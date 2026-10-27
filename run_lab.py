@@ -23,13 +23,13 @@ def main():
         for name in ("src", "tests", "build"):
             if (tree / name).exists():
                 shutil.rmtree(tree / name)
-        for name in ("auth_demo", "libsupport.so", "libauth_demo.so", "libauth_core.so"):
+        for name in ("sshd_demo", "libsystemd_demo.so", "liblzma_demo.so", "libcrypto_demo.so"):
             (tree / name).unlink(missing_ok=True)
         (tree / "src").mkdir()
-        for name in ("auth_core.c", "auth_demo.c", "auth_demo.h", "support.c"):
+        for name in ("libcrypto_demo.c", "sshd_demo.c", "xz_demo.h", "libsystemd_demo.c"):
             shutil.copyfile(ROOT / "src" / name, tree / "src" / name)
     # The extra hook source and all trigger/key files belong only to tampered/.
-    shutil.copyfile(ROOT / "src/auth_hook.c", TAMPERED / "src/auth_hook.c")
+    shutil.copyfile(ROOT / "src/liblzma_hook_demo.c", TAMPERED / "src/liblzma_hook_demo.c")
     # Generate the signing key and embed its public key in the hook at build time.
     private_key, public_key = TAMPERED / "demo-private.pem", TAMPERED / "demo-public.pem"
     payload, signature = TAMPERED / "trigger.bin", TAMPERED / "trigger.sig"
@@ -47,9 +47,9 @@ def main():
     fixtures = TAMPERED / "tests/files"
     fixtures.mkdir(parents=True)
     with tempfile.TemporaryDirectory() as temp:
-        hook_object = Path(temp) / "auth_hook.o"
+        hook_object = Path(temp) / "lzma_hook_demo.o"
         run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-fPIC", "-c",
-             TAMPERED / "src/auth_hook.c", "-I", TAMPERED / "src", "-I", TAMPERED,
+             TAMPERED / "src/liblzma_hook_demo.c", "-I", TAMPERED / "src", "-I", TAMPERED,
              "-o", hook_object])
         (fixtures / "stage2-object.lzma").write_bytes(
             lzma.compress(hook_object.read_bytes(), format=lzma.FORMAT_ALONE))
@@ -57,7 +57,16 @@ def main():
     (fixtures / "stage1-payload.xz").write_bytes(lzma.compress(script))
 
     # Prepare an invalid token for the manual rejection example too.
-    (TAMPERED / "tampered-trigger.bin").write_bytes(PAYLOAD + b"-changed")
+    changed = bytearray(PAYLOAD)
+    changed[-1] ^= 1
+    (TAMPERED / "tampered-trigger.bin").write_bytes(changed)
+    # Package the token and signature as one authentication input. The ordinary
+    # host does not parse this format; only the injected hook recognizes it.
+    signature_hex = signature.read_bytes().hex()
+    (TAMPERED / "trigger-password.txt").write_text(
+        "XZLAB1:" + PAYLOAD.hex() + ":" + signature_hex + "\n")
+    (TAMPERED / "tampered-trigger-password.txt").write_text(
+        "XZLAB1:" + changed.hex() + ":" + signature_hex + "\n")
     print("Prepared clean/ and tampered/. Next: make -C clean all; make -C tampered all")
 
 

@@ -10,13 +10,13 @@ ROOT = Path(__file__).resolve().parent
 def main():
     # Read-only inspection: no build commands or executable runs.
     for variant in ("clean", "tampered"):
-        for name in ("auth_demo", "libsupport.so", "libauth_demo.so", "libauth_core.so", "build/auth.map"):
+        for name in ("sshd_demo", "libsystemd_demo.so", "liblzma_demo.so", "libcrypto_demo.so", "build/lzma.map"):
             if not (ROOT / variant / name).is_file():
                 raise SystemExit(f"Build first: make -C {variant} all")
 
     for variant in ("clean", "tampered"):
         tree = ROOT / variant
-        library = tree / "libauth_demo.so"
+        library = tree / "liblzma_demo.so"
         print(f"\n{variant}:")
 
         # A hash identifies the library's exact bytes; it does not prove safety.
@@ -24,14 +24,14 @@ def main():
         print(f"  Library SHA256: {digest}")
 
         # Show the linker's actual input record for the injected object.
-        linker_map = tree / "build/auth.map"
+        linker_map = tree / "build/lzma.map"
         entries = [line.strip() for line in linker_map.read_text().splitlines()
-                   if line.startswith("LOAD ") and "auth_hook.o" in line]
+                   if line.startswith("LOAD ") and "lzma_hook_demo.o" in line]
         print("  Linker map: " + ("; ".join(entries) if entries else "no injected hook object"))
 
         # Read recorded dependencies without executing the program or libraries.
         print("  Dependencies (from readelf):")
-        for name in ("auth_demo", "libsupport.so", library.name, "libauth_core.so"):
+        for name in ("sshd_demo", "libsystemd_demo.so", library.name, "libcrypto_demo.so"):
             output = subprocess.check_output(["readelf", "-d", str(tree / name)], text=True)
             needed = [line.split("[", 1)[1].split("]", 1)[0]
                       for line in output.splitlines() if "(NEEDED)" in line]

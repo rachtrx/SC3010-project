@@ -1,125 +1,130 @@
 # XZ Utils supply-chain teaching lab
 
-Two builds show normal authentication and a tampered library containing an
-injected object, a GNU IFUNC resolver, and a signature-checking replacement.
-This is a local toy simulation, not the historical backdoor or an SSH server.
+This is the simple constructor + IFUNC version of the local authentication demo.
+Python prepares two compressed fixtures; Make recovers a compiled hook and links
+it into the tampered library. At startup, IFUNC selects the replacement and a
+constructor saves the original function address for fallback. There is no ELF
+scanning, GOT patching, codec probe, or memory-permission manipulation.
+
+The names follow the real components with `_demo` suffixes, so they cannot be
+mistaken for system libraries or collide with OpenSSL's real RSA function. The
+symbol `RSA_public_decrypt_demo` still takes a username/password and checks strings;
+it does not have OpenSSL's RSA API or perform RSA decryption.
+
+This is a toy Linux/glibc demonstration, not SSH or the historical backdoor.
+All commands start from the project root unless otherwise stated.
 
 ## Prepare and build
 
 ```bash
+sudo apt update
 sudo apt install -y build-essential binutils python3 openssl libssl-dev xz-utils curl
 python3 run_lab.py
 make -C clean all
 make -C tampered all
-python3 inspect_lab.py   # optional hashes, linker inputs, dependencies
+python3 inspect_lab.py
 ```
 
-There are two independent Makefiles: `clean/Makefile` and `tampered/Makefile`.
-Both build the same filenames and dependency chain inside their own directory:
+`libssl-dev` supplies the OpenSSL C headers and linker files. `curl` is only for
+the optional archive audit below. IFUNC and `RTLD_NEXT` require a compatible GNU
+ELF/glibc environment; this is not a portable Windows/macOS program.
+
+`run_lab.py` only prepares the inputs. It compiles a temporary object to package
+its bytes, but does not run Make or authentication scenarios. The independent
+`clean/Makefile` and `tampered/Makefile` each build:
 
 ```text
-auth_demo -> libsupport.so -> libauth_demo.so -> libauth_core.so
+sshd_demo -> libsystemd_demo.so -> liblzma_demo.so -> libcrypto_demo.so
 ```
 
-No copying libraries or loader environment variables is necessary. Each executable
-uses `$ORIGIN` to find the libraries beside itself. Both executables are built
-from the same application and normal password-checking code.
-
-`run_lab.py` only prepares inputs; it does not invoke Make or run scenarios.
-Running it again refreshes the copied sources, fixtures, and build outputs while
-preserving both Makefiles. The editable source of truth is the top-level `src/`.
-The copied `clean/src/` and `tampered/src/` files can be inspected separately.
+Both trees use the same output names and application source. `$ORIGIN` finds the
+libraries beside each executable. No copying libraries, `LD_PRELOAD`, or
+`LD_LIBRARY_PATH` is needed. Rerunning preparation refreshes copied sources,
+fixtures, tokens, and outputs while preserving the two Makefiles. Edit top-level
+`src/` files, then prepare again to copy your changes into each tree.
 
 ## Run manually
 
-From the project root:
+The application only accepts `USER PASSWORD`. It has no trigger flags, trigger
+setters, or signature-checking code.
 
 ```bash
-# Clean: normal credentials work; wrong credentials fail.
-./clean/auth_demo student sc3010
+# Normal login works in both builds.
+./clean/sshd_demo student sc3010
 # Authenticated!
-./clean/auth_demo student wrong
-# Authentication denied.
-
-# Tampered: no trigger still means normal password checking.
-./tampered/auth_demo student wrong
-# Authentication denied.
-
-# Tampered: valid signed trigger overrides the wrong password.
-./tampered/auth_demo student wrong --token tampered/trigger.bin --signature tampered/trigger.sig
+./tampered/sshd_demo student sc3010
 # Authenticated!
 
-# Tampered: modified token with the original signature is rejected.
-./tampered/auth_demo student wrong --token tampered/tampered-trigger.bin --signature tampered/trigger.sig
+# Ordinary wrong passwords fail in both builds.
+./clean/sshd_demo student wrong
+# Authentication denied.
+./tampered/sshd_demo student wrong
 # Authentication denied.
 
-# The clean library does not accept even the valid trigger.
-./clean/auth_demo student wrong --token tampered/trigger.bin --signature tampered/trigger.sig
+# Only the tampered hook recognizes the signed input.
+./tampered/sshd_demo student "$(cat tampered/trigger-password.txt)"
+# Authenticated!
+./clean/sshd_demo student "$(cat tampered/trigger-password.txt)"
+# Authentication denied.
+
+# Altered signed data does not activate the override.
+./tampered/sshd_demo student "$(cat tampered/tampered-trigger-password.txt)"
 # Authentication denied.
 ```
 
-Token paths are relative to your current directory. Results come from the actual
-C authentication call, not a scripted test summary. Exit status is 0 for acceptance,
-1 for denial, and 2 for invalid arguments.
+`$(cat FILE)` supplies the text as a single quoted password argument. Only the
+injected hook recognizes its `XZLAB1:TOKEN_HEX:SIGNATURE_HEX` format. The normal
+host passes the input unchanged. This envelope is a teaching substitute for
+trigger data in existing authentication inputs, not the real SSH trigger format.
+An ordinary or invalid special input falls back to normal password checking;
+ordinary correct passwords still work. Exit status is 0 for acceptance, 1 for
+denial, and 2 for invalid argument count.
 
-## Files and their roles
+## Files and build inputs
 
-All editable C files live together in `src/`:
+All editable C code lives in `src/`:
 
 | File | Role |
 |---|---|
-| `auth_demo.c` | Host program: parse arguments and call the support library |
-| `auth_core.c` | Original strong authentication function in `libauth_core.so`; toy stand-in for the RSA-related path |
-| `support.c` | Intermediate library; stores optional hook inputs separately and forwards username/password |
-| `auth_hook.c` | Replacement handler plus IFUNC resolver, packaged into the injected object |
-| `auth_demo.h` | Shared function declarations |
+| `sshd_demo.c` | `main()`: accepts credentials, calls support, prints the actual result |
+| `libsystemd_demo.c` | Forwards credentials to `RSA_public_decrypt_demo()` |
+| `libcrypto_demo.c` | Original strong `RSA_public_decrypt_demo()` in `libcrypto_demo.so` |
+| `liblzma_hook_demo.c` | IFUNC resolver, constructor saving the original, signature checker, replacement |
+| `xz_demo.h` | Ordinary authentication/support declarations only |
 
-The clean source tree contains three C files (`auth_demo.c`, `auth_core.c`,
-`support.c`) and the header. The tampered
-source tree contains those same files plus `auth_hook.c`. Only `tampered/` has the
-signed tokens, public-key files, and `tests/files/` compressed fixtures. Its copy
-of `auth_hook.c` is available for review, but its Makefile never compiles that
-source: it must recover the precompiled object from the fixtures instead.
-Both Makefiles compile `auth_core.c` once into `libauth_core.so`. It exports the
-original strong `authenticate_password()` function. The clean `libauth_demo.so`
-is a bridge that depends on this original library, without defining a replacement.
-The tampered `libauth_demo.so` contains the recovered hook and depends on the same
-original library. Two strong definitions can coexist in different shared libraries;
-they are not linked together into a single library. There are no weak symbols,
-conditional compilation, double compilation, or `auth_library.c`.
+The clean tree receives the three common C files and header. The tampered tree
+receives those plus the hook source for inspection. Only tampered has tokens,
+encoded credential examples, key files, and `tests/files/` fixtures. The tampered
+Makefile never compiles the hook source: its object must be recovered from those
+fixtures. Both Makefiles compile `libcrypto_demo.c` once. No weak symbols, conditional
+compilation, double compilation, or extra wrapper C file is used.
 
-| Other file | Role |
-|---|---|
-| `run_lab.py` | Prepare both source trees, signed tokens, and the two compressed fixtures |
-| `clean/Makefile` | Build normal executable, support/bridge libraries, and original `libauth_core.so` |
-| `tampered/Makefile` | Build the same outputs, recovering the hook object from fixtures |
-| `inspect_lab.py` | Read-only hashes, hook linker-map entry, and dependency chain for both builds |
-| `audit_release.py` | Optional static inspection of a supplied historical archive |
+The original function stays unchanged in `libcrypto_demo.so`. The clean
+`liblzma_demo.so` is a dependency-only bridge: lookup continues to the original.
+The tampered `liblzma_demo.so` contains the IFUNC of the same name, found first,
+and depends on the original library. Separate shared libraries can define the
+same strong name; the original is not overwritten or deleted.
 
-## Object injection during Make
+## Fixture extraction during Make
 
-Preparation generates a throwaway Ed25519 keypair and signs a fixed token.
-It embeds the public key into a temporary compiled `auth_hook.o`, compresses that
-object into the LZMA fixture, and deletes the temporary object and private key.
-It independently compresses an extraction script into the XZ fixture. Both
-fixtures already exist before Make starts.
+Preparation generates a throwaway Ed25519 keypair and signs a fixed token. The
+public key is compiled into a temporary hook object. Python compresses its bytes
+into the LZMA fixture, then deletes the temporary object and private key. The XZ
+fixture independently contains the extraction script. Both exist before Make.
 
 ```text
-Preparation (Python):
-  src/auth_hook.c -> temporary auth_hook.o -> tampered/tests/files/stage2-object.lzma
+Python:
+  src/liblzma_hook_demo.c -> temporary lzma_hook_demo.o -> tampered/tests/files/stage2-object.lzma
   extraction script                       -> tampered/tests/files/stage1-payload.xz
 
-Tampered build (Make):
+Tampered Make:
   stage1-payload.xz -> build/extract-hook.sh
                                 | reads separate stage2-object.lzma
                                 v
-                         build/auth_hook.o
-                                | contains resolver + replacement handler
-                                v
-                         libauth_demo.so
+                         build/lzma_hook_demo.o -> liblzma_demo.so
 ```
 
-The script inside the XZ file is:
+The XZ contains this script, not the LZMA file:
 
 ```sh
 #!/bin/sh
@@ -127,13 +132,12 @@ set -eu
 xz --format=lzma --decompress --stdout tests/files/stage2-object.lzma
 ```
 
-Make uses no Python. Its two extraction commands are `xz -dc ... > ...` and
-`sh build/extract-hook.sh > build/auth_hook.o`. The clean Makefile has no extraction
-rules. Each linker writes `build/auth.map`; only the tampered map includes
-`LOAD build/auth_hook.o`. Hash differences show different library bytes, not
-maliciousness on their own.
+Make runs `xz -dc` to extract the script, then `sh` to run it and recover the
+object. No Python runs during Make. Signature verification happens inside the
+hook, not in a host-approved flag. Changing the public-key PEM after preparation
+does not change the key embedded in the object.
 
-To repeat building and extraction without preparing tokens again:
+To rebuild from existing fixtures without generating new keys:
 
 ```bash
 make -C clean clean
@@ -142,119 +146,225 @@ make -C clean all
 make -C tampered all
 ```
 
-## Exact runtime call order
+## Exact runtime order
 
-### Tampered build
+### Tampered
 
-1. You run `./tampered/auth_demo ...`. The loader loads `libsupport.so`,
-   `libauth_demo.so`, and the original `libauth_core.so`.
-2. While resolving support's `authenticate_password` reference, the loader finds
-   the IFUNC in the tampered `libauth_demo.so` and calls `resolve_authentication()`.
-   It returns the address of `hooked_authentication`. This selects the replacement;
-   it does **not** authenticate anyone, check signatures, or delete the original.
-3. After relocation, the constructor `save_original_authentication()` runs.
-   `dlsym(RTLD_NEXT, "authenticate_password")` finds the untouched original in
-   `libauth_core.so` and saves its address in `original_authentication`.
-4. Library initialization finishes, and the executable's `main()` starts.
-   The hook and resolver do not call `main()` themselves.
-5. `main()` parses the username/password and optional token/signature paths.
-6. `main()` calls `support_set_trigger(token_path, signature_path)` to store the
-   optional paths separately in support's `signed_trigger` struct. Only the hook
-   reads this data; it is not a pre-verified flag or an authentication result.
-7. `main()` calls `support_authenticate(username, password)`.
-8. Support calls `authenticate_password(username, password)`. The function address
-   selected in step 2 sends this call to `hooked_authentication`.
-9. The hook calls `support_get_trigger()` and verifies the token and signature.
-   A valid trigger returns success. Otherwise it calls
-   `original_authentication(username, password)`, using the saved address from
-   step 3. The original checker receives **only username and password** and
-   performs the ordinary password check; it never sees token/signature paths.
-10. The result returns through support to `main()`, which prints `Authenticated!`
-    or `Authentication denied.` and exits.
+1. You start `tampered/sshd_demo`. Its libraries load through the dependency chain.
+2. Support's `RSA_public_decrypt_demo` reference finds the IFUNC in `liblzma_demo.so`.
+   Because support uses `-z now`, the loader calls `resolve_RSA_public_decrypt_demo()`
+   before `main()`. It returns the address of `hooked_RSA_public_decrypt_demo`. This only
+   selects a function; it does not check passwords or signatures yet.
+3. After relocation, the constructor `save_original_RSA_public_decrypt_demo()` runs.
+   `dlsym(RTLD_NEXT, "RSA_public_decrypt_demo")` searches after this library and
+   finds the original in `libcrypto_demo.so`. Its address is saved in
+   `original_RSA_public_decrypt`. No memory tables are patched.
+4. Initialization finishes and normal startup enters `main()`.
+5. `main()` passes username/password to `systemd_bridge_demo()`.
+6. Support calls `RSA_public_decrypt_demo()`. The address selected by IFUNC sends
+   this call to `hooked_RSA_public_decrypt_demo`.
+7. Only the hook parses a signed credential envelope and verifies its signature.
+   Valid signed data returns success. Ordinary or invalid inputs call the saved
+   `original_RSA_public_decrypt(username, password)` pointer, forwarding both arguments
+   unchanged. If the original lookup failed, the hook denies access.
+8. The result returns through support to `main()`, which prints it.
 
 ```text
-Startup: resolver selects hook -> constructor saves original -> main starts
+Startup: IFUNC selects replacement -> constructor saves original -> main
 
-main: store optional trigger paths in support (separate configuration)
-main -> support_authenticate(user, password)
-     -> hooked_authentication(user, password)
-          | reads paths from support and verifies signature
-          | valid: return success
-          | absent/invalid: original_authentication(user, password)
-          |                       -> original password checker
+main -> support -> IFUNC-selected replacement
+                     valid signed input: accept
+                     otherwise: saved pointer -> original password checker
      <- result through support
 main prints result
 ```
 
-### Clean build
+The saved pointer avoids recursively looking up the intercepted name. The
+original function still exists in its own library. The resolver and constructor
+do not call `main()` themselves.
 
-There is no IFUNC or hook constructor. The loader resolves `authenticate_password`
-to the ordinary function in `libauth_core.so`. `main()` parses arguments and
-stores the optional paths in support, but nothing reads them. The call sequence is
-`main -> support_authenticate(username, password) -> authenticate_password(username,
-password) -> result -> main prints result`. Only the password check decides access.
+### Clean
 
-## IFUNC and the historical analogy
+There is no hook IFUNC or hook constructor. Lookup reaches the ordinary function
+in `libcrypto_demo.so`: `main -> support -> original password checker -> result`.
+No normal application code knows that signed credentials or a hook exist.
 
-`auth_core.c` is the toy stand-in for the original RSA-related authentication
-function. It compares a username/password, not actual RSA, and lives in the
-separate `libauth_core.so`. That library is unchanged between builds.
+## Inspect evidence
 
-The clean bridge `libauth_demo.so` has no replacement; calls from support resolve
-to the original strong function in its `libauth_core.so` dependency. The tampered
-`libauth_demo.so` exports `authenticate_password` as an IFUNC, which is found before
-the original in that dependency. Its resolver selects `hooked_authentication`.
-Because support is linked with `-z now`, selection happens before `main()`.
-The resolver only returns an address and performs no file I/O or crypto.
-
-After relocation and before `main()`, the tampered library's constructor saves the
-original function's address:
-
-```c
-original_authentication = (authentication_fn)dlsym(RTLD_NEXT, "authenticate_password");
-```
-
-`RTLD_NEXT` searches after the current library, skipping its own IFUNC and finding
-the original function in `libauth_core.so`. When authentication is called, the
-replacement verifies the signature. If the trigger is absent or invalid, it calls
-that saved address directly:
-
-```c
-return original_authentication(username, password);
-```
-
-It does not call `authenticate_password` by name, which would resolve back to the
-replacement and recurse. If saving the original fails, the hook denies access.
-
-```text
-Clean:     main -> support -> original authenticate_password in libauth_core.so
-Tampered:  main -> support -> replacement in libauth_demo.so
-                                  valid signature: accept
-                                  otherwise: saved pointer -> libauth_core.so
-```
-
-The historical backdoor similarly preserved the original OpenSSL function address
-and used that pointer for fallback. See the original-pointer assignment and
-fallback call in [Binarly's reverse engineering](https://github.com/binarly-io/binary-risk-intelligence/blob/master/xz-backdoor/readme.md).
-Our version models this without weak symbols or a separately named fallback.
-
-This remains a simplified local demonstration: the real attack used unrelated
-liblzma checksum IFUNC startup code to interfere with lookup of OpenSSL's
-`RSA_public_decrypt`. Here the tampered auth library directly supplies the IFUNC
-for our toy function, and `dlsym` saves the untouched original from its dependency.
-We do not modify the loader's lookup structures. Local Ed25519 token files replace
-the historical Ed448 protocol. There is no network listener or command payload.
-
-The indirect dependency analogy is host -> support -> compromised library; the
-extra `libauth_core.so` represents the independent library containing the original
-cryptographic function. Identical C sources are not a historical requirement.
-
-To inspect the symbols without executing either program:
+`inspect_lab.py` reads library hashes, the hook object's `LOAD` entry in
+`build/lzma.map`, and dependencies using `readelf`. It does not build or run the
+programs. Different hashes show different bytes; the extracted linker input and
+observed behavior explain the difference.
 
 ```bash
-readelf -Ws clean/libauth_core.so | grep authenticate_password      # original FUNC
-readelf -Ws tampered/libauth_demo.so | grep authenticate_password   # replacement IFUNC
+readelf -Ws clean/libcrypto_demo.so | grep RSA_public_decrypt_demo     # original FUNC
+readelf -Ws tampered/liblzma_demo.so | grep RSA_public_decrypt_demo  # replacement IFUNC
 ```
+
+## Historical attack: end-to-end technical flow
+
+The sequence below is a technical overview, not a claim that this project
+reproduces every stage of CVE-2024-3094.
+
+1. **Compromised releases were distributed.** XZ Utils 5.6.0 and 5.6.1 release
+   tarballs contained the backdoor. Release archives and repository-generated
+   source archives were not equivalent inputs. [XZ maintainer's incident notes](https://tukaani.org/xz-backdoor/)
+2. **Build machinery activated hidden material.** A modified release-only
+   `m4/build-to-host.m4` activated processing of compressed test fixtures already
+   present in the repository. [Maintainer's review](https://tukaani.org/xz-backdoor/review.html)
+3. **Staged extraction recovered injected code.** Build scripts processed
+   `bad-3-corrupt_lzma2.xz`, then separate `good-large_compressed.lzma`, and
+   incorporated recovered object code into liblzma. Activation checked selected
+   platform, toolchain, and packaging conditions. [Original disclosure](https://www.openwall.com/lists/oss-security/2024/03/29/4)
+4. **The affected library reached another program.** In some distribution builds,
+   sshd's systemd integration indirectly loaded liblzma. This was library loading,
+   not an RSA authentication call forwarded by libsystemd. [Original disclosure](https://www.openwall.com/lists/oss-security/2024/03/29/4)
+5. **Startup code established interception.** Modified checksum IFUNC resolvers
+   ran during startup. Injected code interfered with symbol resolution so calls
+   intended for OpenSSL's `RSA_public_decrypt` reached a replacement carried in
+   liblzma. The RSA function was not itself the checksum IFUNC. [Original disclosure](https://www.openwall.com/lists/oss-security/2024/03/29/4)
+6. **Attacker input reached the replacement.** Specially constructed RSA-key data
+   in the authentication path carried an encrypted, signed trigger. The hook
+   checked an Ed448 signature against its embedded trust material, including
+   host-related binding. [Binarly's reverse engineering](https://github.com/binarly-io/binary-risk-intelligence/blob/master/xz-backdoor/readme.md)
+7. **Verified requests enabled malicious behavior.** Supported operations included
+   command execution. This was more than accepting an arbitrary wrong password.
+   The private signing key controlled access to the authenticated trigger path.
+   [Binarly's reverse engineering](https://github.com/binarly-io/binary-risk-intelligence/blob/master/xz-backdoor/readme.md)
+8. **Normal processing could continue.** The hook preserved the original function
+   address and used it for fallback. It could call that address without looking up
+   the intercepted name again. [Binarly's reverse engineering](https://github.com/binarly-io/binary-risk-intelligence/blob/master/xz-backdoor/readme.md)
+
+The compromise was not perfectly invisible: slow SSH logins and diagnostic errors
+helped expose it. [Andres Freund's disclosure](https://www.openwall.com/lists/oss-security/2024/03/29/4)
+
+### The crucial distinction: loading versus calling
+
+```text
+Historical loading relationships (simplified):
+sshd
+├── OpenSSL/libcrypto                  original RSA function
+└── libsystemd
+    └── liblzma                        injected startup code + replacement
+
+Normal RSA call:
+sshd -> original OpenSSL RSA function
+
+After interception:
+sshd -> replacement inside liblzma
+           ordinary/unrecognized input -> saved original OpenSSL function
+           verified trigger            -> authenticated malicious operation
+```
+
+**Neither the original RSA call nor the redirected replacement call needed to
+pass through libsystemd.** Libsystemd was relevant because its dependency caused
+liblzma to be loaded into the process. Once loaded, the injected code established
+interception separately.
+
+## How this project models those stages
+
+The project demonstrates an actual working chain for the selected mechanisms:
+fixture extraction produces a real object, that object becomes library code,
+the GNU loader selects its replacement, and that replacement verifies signed
+input before deciding whether to override or call the original. These are
+executed behaviors, not just messages describing an attack.
+
+| Stage / purpose | What this project actually does | Where to see it |
+|---|---|---|
+| Package executable code as apparent test data | Compile a hook object and compress it into a separate LZMA fixture | `run_lab.py` |
+| Use one fixture to process another | XZ contains a script naming the separate LZMA file; both exist before Make | `tampered/tests/files/` |
+| Inject during the build | Make extracts the script, runs it, recovers `lzma_hook_demo.o`, and links it into the child library | `tampered/Makefile`, `build/lzma.map` |
+| Carry replacement code in a dependency | The tampered `liblzma_demo.so` contains the recovered replacement and resolver | `src/liblzma_hook_demo.c` |
+| Select behavior before the host starts | Real GNU IFUNC resolution occurs before `main()` because support uses `-z now` | `resolve_RSA_public_decrypt_demo()` |
+| Retain access to the normal implementation | A constructor obtains the separate original with `dlsym(RTLD_NEXT, ...)` and saves its address | `save_original_RSA_public_decrypt_demo()` |
+| Let existing authentication input reach the hook | The host accepts only username/password; only the injected object understands the signed envelope | `src/sshd_demo.c`, `verified_trigger()` |
+| Gate the override cryptographically | Verify a signature using the embedded public key inside the hook, not in the host | `verified_trigger()` |
+| Preserve ordinary logins | Call the saved original address for ordinary or invalid special input | `hooked_RSA_public_decrypt_demo()` |
+| Make the result reviewable | Compare library hashes, linker inputs, dependencies, and actual login outcomes | `inspect_lab.py` and the manual examples |
+
+The original checker remains unchanged in `libcrypto_demo.so`. Clean and tampered
+builds use the same application source and library filenames. This isolates the
+extra behavior to the dependency being compared. That is a deliberate experimental
+control, not a claim that all historical C sources or build inputs were identical.
+
+## Limitations: what the current simple model does not reproduce
+
+### 1. Authentication still passes through the teaching bridge
+
+The current code deliberately uses this forwarding chain:
+
+```text
+sshd_demo -> systemd_bridge_demo -> RSA_public_decrypt_demo
+                                       clean: original implementation
+                                    tampered: IFUNC-selected replacement
+                                                  -> saved original for fallback
+```
+
+`systemd_bridge_demo()` is an invented teaching function, **not a real systemd
+API**. Unlike the historical attack, both normal and replacement authentication
+calls in this project pass through that bridge. Merely loading a dependency does
+not intercept an unrelated function call. The bridge and symbol lookup order
+make the simplified replacement work.
+
+The former, longer version used local call-address redirection and could reach
+both original and replacement without this bridge. That code was removed in
+favor of the requested simple constructor + IFUNC version. **The current project
+does not patch GOT/PLT slots or independently hijack the host's direct RSA call.**
+
+### 2. The IFUNC and initialization sequence are simplified
+
+Our toy RSA-named entry is itself the IFUNC. Its resolver directly selects the
+replacement; a later constructor saves the original with `RTLD_NEXT`. We do not
+reproduce an unrelated checksum resolver setting up interception of an OpenSSL
+function, manipulate loader lookup structures, or implement the real hook-install
+sequence. Names and genuine IFUNC usage do not make those mechanisms equivalent.
+
+### 3. The function names are analogies, not real implementations
+
+`RSA_public_decrypt_demo(username, password)` compares strings; it does not have
+OpenSSL's RSA function signature or perform RSA cryptography. `sshd_demo` is a
+short-lived local executable, not OpenSSH, and `liblzma_demo.so` does not implement
+a compression library. The `_demo` suffix avoids collisions with real components.
+The hook uses the real OpenSSL library only to check its demonstration signature.
+
+### 4. Trigger encoding, trust setup, and effect are reduced
+
+We use a fixed token with Ed25519 and a readable hex envelope in the password
+argument. There is no real SSH exchange, RSA-key carrier, encrypted trigger
+protocol, host-key binding, or Ed448 implementation. A fresh throwaway key is
+created for each preparation. The test input's private key is deleted afterward;
+the public key stays embedded in the object. These are reproducible lab artifacts,
+not the historical attacker's keys or payloads.
+
+A valid trigger simply makes the toy check return success. It does not execute
+commands, establish a remote session, reproduce privilege behavior, or demonstrate
+the full impact of the actual authenticated command-execution path.
+
+### 5. Packaging and targeting are transparent teaching substitutes
+
+Python openly prepares the fixtures and token examples; there is no compromised
+release producer, modified Autotools `configure`/M4 chain, social engineering,
+release archive generation, obfuscation, or reproduction of the historical
+platform/toolchain/distribution/debugger gates. Both fixtures are supplied only to
+the tampered tree to make the comparison easy. The historical fixture files were
+also present in the repository; the separate audit below examines that difference.
+
+The source of the injected object is available for reading. The generated Make
+build does recover its compiled bytes from fixtures rather than silently compiling
+the visible hook source. This demonstrates the build mechanism, not stealth.
+
+### 6. Scope of the evidence and platform
+
+Hashes establish byte differences, linker maps show included inputs, and dependency
+records show library requirements. They do not prove successful historical
+exploitation or identify maliciousness on their own. Manual runtime comparisons
+establish only the behavior exercised by this toy program; they are not a complete
+analysis of OpenSSH or XZ. The local code needs a compatible GNU ELF/glibc IFUNC
+and `RTLD_NEXT` environment and OpenSSL development files. It does not install
+compromised libraries, modify system files, or validate a real affected deployment.
+
+The optional archive audit below is separate. Only its report uses `generated/`;
+the runnable builds use `clean/` and `tampered/`.
 
 ## Static examination of the actual 5.6.1 release archive
 
