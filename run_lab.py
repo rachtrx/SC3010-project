@@ -1,94 +1,64 @@
 #!/usr/bin/env python3
-"""Controlled educational analogue. Never downloads or executes historical malware."""
-import hashlib
+"""Prepare signed tokens, compressed hook fixtures, and a build tree. Run Make next."""
 import json
 import lzma
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 
 ROOT = Path(__file__).resolve().parent
-WORK = ROOT / "generated"
-MARKER = "[lab marker] release-only object executed inside demo_service"
+TAMPERED = ROOT / "tampered"
+PAYLOAD = b"XZ-LAB:fixed-auth-control-flow-demo:v1"
 
 
-def run(args, cwd=ROOT):
-    result = subprocess.run([str(a) for a in args], cwd=cwd,
-                            text=True, capture_output=True)
-    if result.returncode:
-        raise RuntimeError(f"Command failed: {args}\n{result.stdout}{result.stderr}")
-    return result.stdout
-
-
-def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def run(args):
+    subprocess.run([str(arg) for arg in args], cwd=ROOT, check=True)
 
 
 def main():
-    for tool in ("gcc", "make", "readelf", "strings"):
-        if not shutil.which(tool):
-            raise SystemExit(f"Missing {tool}; run this inside Ubuntu after installing build-essential binutils")
-    WORK.mkdir(exist_ok=True)
-    marker_object = WORK / "teaching-marker.o"
-    run(["gcc", "-O2", "-fPIC", "-c", ROOT / "teaching/marker.c", "-o", marker_object])
-    # Ordinary compression, deliberately transparent rather than real obfuscation.
-    fixture = lzma.compress(marker_object.read_bytes())
-    results = []
-    for name in ("source", "clean-release", "tampered-release"):
-        tree = WORK / name
-        tree.mkdir(exist_ok=True)
-        shutil.copytree(ROOT / "src", tree / "src", dirs_exist_ok=True)
-        shutil.copyfile(ROOT / "Makefile", tree / "Makefile")
-        # Remove only the known build directory inside this generated variant.
-        build = tree / "build"
-        if build.exists():
-            shutil.rmtree(build)
-        args = ["make", "all"]
-        if name != "source":
-            (tree / "release-metadata.txt").write_text("educational release packaging\n")
-        if name == "tampered-release":
-            fixtures = tree / "tests/files"
-            fixtures.mkdir(parents=True, exist_ok=True)
-            (fixtures / "marker-fixture.xz").write_bytes(fixture)
-            # Models a release-only build step; does not run any extracted script.
-            build.mkdir()
-            recovered = build / "fixture-marker.o"
-            recovered.write_bytes(lzma.decompress((fixtures / "marker-fixture.xz").read_bytes()))
-            assert recovered.read_bytes() == marker_object.read_bytes()
-            args.append("EXTRA_OBJECTS=build/fixture-marker.o")
-        build_log = run(args, cwd=tree)
-        (tree / "build.log").write_text(build_log)
-        output = run([build / "demo_service"])
-        (tree / "runtime.txt").write_text(output)
-        deps = {}
-        for file in ("demo_service", "libsupport.so", "libcodec_demo.so"):
-            deps[file] = run(["readelf", "-d", build / file])
-        (tree / "dependencies.txt").write_text(json.dumps(deps, indent=2))
-        strings = run(["strings", build / "libcodec_demo.so"])
-        row = {
-            "variant": name,
-            "source_sha256": {p.name: digest(p) for p in sorted((tree / "src").glob("*.c"))},
-            "library_sha256": digest(build / "libcodec_demo.so"),
-            "marker_in_library": MARKER in strings,
-            "marker_executed": MARKER in output,
-            "checksum_passed": "checksum=1236" in output,
-            "extra_object_in_map": "fixture-marker.o" in (build / "codec.map").read_text(),
-        }
-        expected_marker = name == "tampered-release"
-        assert row["checksum_passed"]
-        assert row["marker_in_library"] == expected_marker
-        assert row["marker_executed"] == expected_marker
-        assert row["extra_object_in_map"] == expected_marker
-        assert "libsupport.so" in deps["demo_service"]
-        assert "libcodec_demo.so" not in deps["demo_service"]
-        assert "libcodec_demo.so" in deps["libsupport.so"]
-        results.append(row)
-        print(f"{name}: checksum PASS; marker={row['marker_executed']}; extra object={row['extra_object_in_map']}")
-    assert all(r["source_sha256"] == results[0]["source_sha256"] for r in results)
-    assert results[0]["library_sha256"] == results[1]["library_sha256"]
-    assert results[1]["library_sha256"] != results[2]["library_sha256"]
-    (WORK / "results.json").write_text(json.dumps(results, indent=2) + "\n")
-    print("All checks passed. Evidence saved under generated/.")
+    # Refresh each example's generated files, preserving its own Makefile.
+    for variant in ("clean", "tampered"):
+        tree = ROOT / variant
+        for name in ("src", "tests", "build"):
+            if (tree / name).exists():
+                shutil.rmtree(tree / name)
+        for name in ("auth_demo", "libsupport.so", "libauth_demo.so", "libauth_core.so"):
+            (tree / name).unlink(missing_ok=True)
+        (tree / "src").mkdir()
+        for name in ("auth_core.c", "auth_demo.c", "auth_demo.h", "support.c"):
+            shutil.copyfile(ROOT / "src" / name, tree / "src" / name)
+    # The extra hook source and all trigger/key files belong only to tampered/.
+    shutil.copyfile(ROOT / "src/auth_hook.c", TAMPERED / "src/auth_hook.c")
+    # Generate the signing key and embed its public key in the hook at build time.
+    private_key, public_key = TAMPERED / "demo-private.pem", TAMPERED / "demo-public.pem"
+    payload, signature = TAMPERED / "trigger.bin", TAMPERED / "trigger.sig"
+    payload.write_bytes(PAYLOAD)
+    run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", private_key])
+    run(["openssl", "pkey", "-in", private_key, "-pubout", "-out", public_key])
+    (TAMPERED / "trusted_key.h").write_text(
+        "static const char TRUSTED_PUBLIC_KEY[] = " + json.dumps(public_key.read_text()) + ";\n")
+    run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", private_key,
+         "-in", payload, "-out", signature])
+    private_key.unlink()
+
+    # Compile the hook ONCE during fixture preparation, then package its bytes.
+    # The temporary object disappears; Make must recover it from the LZMA file.
+    fixtures = TAMPERED / "tests/files"
+    fixtures.mkdir(parents=True)
+    with tempfile.TemporaryDirectory() as temp:
+        hook_object = Path(temp) / "auth_hook.o"
+        run(["gcc", "-O2", "-Wall", "-Wextra", "-Werror", "-fPIC", "-c",
+             TAMPERED / "src/auth_hook.c", "-I", TAMPERED / "src", "-I", TAMPERED,
+             "-o", hook_object])
+        (fixtures / "stage2-object.lzma").write_bytes(
+            lzma.compress(hook_object.read_bytes(), format=lzma.FORMAT_ALONE))
+    script = b"#!/bin/sh\nset -eu\nxz --format=lzma --decompress --stdout tests/files/stage2-object.lzma\n"
+    (fixtures / "stage1-payload.xz").write_bytes(lzma.compress(script))
+
+    # Prepare an invalid token for the manual rejection example too.
+    (TAMPERED / "tampered-trigger.bin").write_bytes(PAYLOAD + b"-changed")
+    print("Prepared clean/ and tampered/. Next: make -C clean all; make -C tampered all")
 
 
 if __name__ == "__main__":

@@ -5,3 +5,10 @@ __pycache__/
 *.log
 generated/
 *.pdf
+.vscode/
+
+# Prepared examples: keep their Makefiles, regenerate all other files.
+/clean/*
+!/clean/Makefile
+/tampered/*
+!/tampered/Makefile
