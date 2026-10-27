@@ -387,12 +387,31 @@ The auditor reads expected regular files directly from the archive in memory. It
 does not extract archive paths, run `configure`, evaluate embedded shell, or execute
 any object file. Evidence is written to `generated/forensic-5.6.1.json`.
 
-In our archived copy, `m4/build-to-host.m4` exists in the release archive but not in
-the Git tag archive. The two suspicious test fixtures exist in both, with matching
-SHA256 hashes. Debian records SHA256
-`f334777310ca3ae9ba07206d78ed286a655aa3f44eec27854f740c26b2cd2ed0` for the release
-archive. This reproduces the first important forensic finding: the build trigger was
-in release packaging, while the opaque fixture data was already in Git.
+### Findings from our static audit
+
+The saved [forensic report](generated/forensic-5.6.1.json) records:
+
+| Check | Finding |
+|---|---|
+| Release archive identity | SHA256 matches the value published in Debian's package announcement |
+| `m4/build-to-host.m4` | Present in the release archive (4,399 bytes); absent from the Git-tag archive |
+| `tests/files/bad-3-corrupt_lzma2.xz` | Present in both archives, with identical SHA256 hashes |
+| `tests/files/good-large_compressed.lzma` | Present in both archives, with identical SHA256 hashes |
+| Selected build-script lines | Flags lines 63, 65, and 86; these include an extraction/evaluation expression and a marker search |
+
+**Presentation summary:** We reproduced a known release-versus-repository
+discrepancy: the release archive contains additional build machinery, while the
+suspicious compressed fixture bytes were already present in both sources. This
+supports the distinction between release packaging and repository contents.
+
+The release archive's SHA256 is
+`f334777310ca3ae9ba07206d78ed286a655aa3f44eec27854f740c26b2cd2ed0`.
+This is a targeted static comparison, not a complete archive diff or an independent
+discovery of the backdoor. A release-only file or hash match alone does not prove
+maliciousness. The auditor does not verify PGP signatures, execute the extracted
+build logic, or demonstrate historical exploitation. Its default output path is
+relative to the working directory; running from this project root writes
+`/home/rachm/xz-lab/generated/forensic-5.6.1.json`.
 
 Primary sources: [Andres Freund's disclosure](https://www.openwall.com/lists/oss-security/2024/03/29/4),
 [Debian's 5.6.1 source-package announcement](https://tracker.debian.org/news/1515323/accepted-xz-utils-561-1-source-into-unstable/),
